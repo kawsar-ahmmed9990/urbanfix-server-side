@@ -43,7 +43,7 @@ async function run() {
     const userCollection = db.collection("users");
     const paymentCollection = db.collection("payments");
 
-    console.log("✅ MongoDB Connected");
+    console.log("MongoDB Connected");
 
     // ISSUES ---------------------------------
     app.get("/issues", async (req, res) => {
@@ -298,39 +298,86 @@ async function run() {
       res.send(staff);
     });
 
-    app.post("/staff", async (req, res) => {
-      const { name, email, phone, photo, password } = req.body;
-
-      if (!password) {
-        return res
-          .status(400)
-          .send({ message: "Password is required for staff login" });
-      }
-
+    app.post("/staff", upload.single("photo"), async (req, res) => {
+      const session = client.startSession();
       try {
-        //  Firebase Create -----------------
-        const firebaseUser = await admin.auth().createUser({
-          email,
-          password,
-          displayName: name,
-          photoURL: photo,
+        const { name, email, phone, password } = req.body;
+
+        if (!name || !email || !password) {
+          return res
+            .status(400)
+            .send({ message: "Name, email, and password are required" });
+        }
+        if (password.length < 6) {
+          return res
+            .status(400)
+            .send({ message: "Password must be at least 6 characters" });
+        }
+
+        const existingUser = await userCollection.findOne({ email });
+        if (existingUser) {
+          return res
+            .status(409)
+            .send({ message: "Staff with this email already exists" });
+        }
+
+        let photoPath = null;
+        let photoURL = null;
+        if (req.file) {
+          const normalizedPath = req.file.path.replace(/\\/g, "/");
+          photoPath = `uploads/${req.file.filename}`;
+
+          const encodedPath = encodeURI(normalizedPath);
+          photoURL = `${process.env.SITE_DOMAIN.replace(/\/$/, "")}/${encodedPath}`;
+          console.log("Firebase user photoURL (encoded):", photoURL);
+        }
+
+        console.log("Incoming staff data:", req.body);
+        console.log("File uploaded:", req.file);
+        console.log("Firebase user photoURL:", photoURL);
+
+        let firebaseUid;
+
+        await session.withTransaction(async () => {
+          try {
+            const firebaseUser = await admin.auth().createUser({
+              email,
+              password,
+              displayName: name,
+              photoURL: photoURL || undefined,
+            });
+            firebaseUid = firebaseUser.uid;
+          } catch (firebaseError) {
+            throw new Error(
+              `Firebase user creation failed: ${firebaseError.message}`,
+            );
+          }
+
+          await userCollection.insertOne(
+            {
+              name,
+              email,
+              phone: phone || null,
+              photo: photoPath,
+              photoURL,
+              role: "staff",
+              firebaseUid,
+              createdAt: new Date(),
+              isBlocked: false,
+              isPremium: false,
+            },
+            { session },
+          );
         });
 
-        //  MongoDB Insert -----------------
-        const result = await userCollection.insertOne({
-          name,
-          email,
-          phone,
-          photo,
-          role: "staff",
-          createdAt: new Date(),
-          firebaseUid: firebaseUser.uid, // future use
-        });
-
-        res.send({ success: true, data: result });
+        res.send({ success: true, message: "Staff added successfully" });
       } catch (err) {
         console.error("Staff creation failed:", err);
-        res.status(500).send({ message: err.message });
+        res
+          .status(500)
+          .send({ message: "Staff creation failed", error: err.message });
+      } finally {
+        await session.endSession();
       }
     });
 
@@ -455,6 +502,6 @@ async function run() {
 
 run().catch(console.dir);
 
-app.get("/", (req, res) => res.send("UrbanFix Server Running 🚀"));
-// app.listen(port, () => console.log(`Server running on port ${port}`));
+app.get("/", (req, res) => res.send("UrbanFix Server Running "));
+app.listen(port, () => console.log(`Server running on port ${port}`));
 module.exports = app;
